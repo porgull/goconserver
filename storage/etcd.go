@@ -3,12 +3,14 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/coreos/etcd/clientv3"
-	"github.com/xcat2/goconserver/common"
-	"github.com/xcat2/goconserver/storage/etcd"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/coreos/etcd/clientv3"
+	"github.com/xcat2/goconserver/common"
+	"github.com/xcat2/goconserver/storage/etcd"
+	"stathat.com/c/consistent"
 )
 
 const (
@@ -124,7 +126,7 @@ func (self *EtcdStorage) GetVhosts() (map[string]*EndpointConfig, error) {
 }
 
 func (self *EtcdStorage) ImportNodes() {
-	kvs, err := self.client.List(EtcdKeyJoin(NODE_PREFIX, self.vhost))
+	kvs, err := self.client.List(EtcdKeyJoin(NODE_PREFIX))
 	if err != nil {
 		plog.Error(fmt.Sprintf("Unable to import node from storage, Error: %s", err))
 		panic(err)
@@ -138,33 +140,67 @@ func (self *EtcdStorage) ImportNodes() {
 	}
 }
 
-func (self *EtcdStorage) GetNodeCountEachHost() (map[string]int, error) {
-	var err error
-	hosts, err := self.GetVhosts()
-	if err != nil {
-		return nil, err
-	}
-	nodeCountMap := make(map[string]int)
-	for host, _ := range hosts {
-		nodeCountMap[host], err = self.client.Count(EtcdKeyJoin(NODE_PREFIX, host))
-		if err != nil {
-			return nil, err
-		}
-	}
-	return nodeCountMap, nil
-}
-
 func (self *EtcdStorage) ListNodeWithHost() (map[string]string, error) {
 	nodeToHost := make(map[string]string)
 	resp, err := self.client.Keys(EtcdKeyJoin(NODE_PREFIX))
 	if err != nil {
 		return nil, err
 	}
-	for _, k := range resp {
-		temp := strings.Split(string(k), "/")
-		nodeToHost[temp[len(temp)-1]] = temp[len(temp)-2]
+	allHostsMap, err := self.GetVhosts()
+	if err != nil {
+		return nil, err
+	}
+
+	hosts := make([]string, 0, len(allHostsMap))
+	for host := range allHostsMap {
+		hosts = append(hosts, host)
+	}
+
+	for _, path := range resp {
+		split := strings.Split(path, "/")
+		node := split[len(split)-1] // node is the last element in the 'path'
+
+		nodeToHost[node], err = self.nodeToHost(node, hosts)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return nodeToHost, nil
+}
+
+func (self *EtcdStorage) NodeToHost(node string) (string, error) {
+	hostMap, err := self.GetVhosts()
+	if err != nil {
+		return "", err
+	}
+
+	hosts := make([]string, 0, len(hostMap))
+	for host := range hostMap {
+		hosts = append(hosts, host)
+	}
+
+	return self.nodeToHost(node, hosts)
+}
+
+func (self *EtcdStorage) nodeToHost(node string, hosts []string) (string, error) {
+	hash := self.getConsistentHash(hosts)
+
+	host, err := hash.Get(node) // gets the host closest to the node in the hash
+	if err != nil {
+		return "", err
+	}
+
+	return host, nil
+}
+
+func (self *EtcdStorage) getConsistentHash(hosts []string) *consistent.Consistent {
+	consistent := consistent.New()
+
+	for _, host := range hosts {
+		consistent.Add(host)
+	}
+
+	return consistent
 }
 
 func (self *EtcdStorage) NotifyPersist(record interface{}, action int) error {
@@ -186,7 +222,7 @@ func (self *EtcdStorage) NotifyPersist(record interface{}, action int) error {
 }
 
 func (self *EtcdStorage) PersistWatcher(c chan<- interface{}) {
-	key := EtcdKeyJoin(NODE_PREFIX, self.vhost)
+	key := EtcdKeyJoin(NODE_PREFIX)
 	fc := func(events []*clientv3.Event, c chan<- interface{}) {
 		for _, event := range events {
 			switch event.Type {
@@ -219,12 +255,7 @@ func (self *EtcdStorage) putNode(record interface{}) error {
 	if node, ok = record.(*Node); !ok {
 		return common.ErrInvalidType
 	}
-	dispatcher := newDispatcher(self)
-	host, err := dispatcher.PeekPutHost(node)
-	if err != nil {
-		return nil
-	}
-	key := EtcdKeyJoin(NODE_PREFIX, host, node.Name)
+	key := EtcdKeyJoin(NODE_PREFIX, node.Name)
 	b, err := json.Marshal(*node)
 	if err != nil {
 		plog.ErrorNode(node.Name, err)
@@ -243,22 +274,17 @@ func (self *EtcdStorage) putNodes(record interface{}) error {
 	if nodes, ok = record.([]Node); !ok {
 		return common.ErrInvalidType
 	}
-	dispatcher := newDispatcher(self)
-	m, err := dispatcher.PeekPutHostMap(nodes)
-	if err != nil {
-		return err
-	}
 	data := make(map[string]string)
-	for node, host := range m {
+	for _, node := range nodes {
 		b, err := json.Marshal(node)
 		if err != nil {
 			plog.ErrorNode(node.Name, err)
 			return err
 		}
-		key := EtcdKeyJoin(NODE_PREFIX, host, node.Name)
+		key := EtcdKeyJoin(NODE_PREFIX, node.Name)
 		data[key] = string(b)
 	}
-	err = self.client.MultiPut(data)
+	err := self.client.MultiPut(data)
 	if err != nil {
 		return err
 	}
@@ -271,13 +297,8 @@ func (self *EtcdStorage) delNode(record interface{}) error {
 	if name, ok = record.(string); !ok {
 		return common.ErrInvalidType
 	}
-	dispatcher := newDispatcher(self)
-	host, err := dispatcher.PeekDelHost(name)
-	if err != nil {
-		return err
-	}
-	key := EtcdKeyJoin(NODE_PREFIX, host, name)
-	err = self.client.Del(key)
+	key := EtcdKeyJoin(NODE_PREFIX, name)
+	err := self.client.Del(key)
 	if err != nil {
 		return err
 	}
@@ -290,20 +311,23 @@ func (self *EtcdStorage) delNodes(record interface{}) error {
 	if names, ok = record.([]string); !ok {
 		return common.ErrInvalidType
 	}
-	dispatcher := newDispatcher(self)
-	hostMap, err := dispatcher.PeekDelHostMap(names)
-	if err != nil {
-		return err
-	}
-	keys := make([]string, len(hostMap))
+	keys := make([]string, len(names))
 	i := 0
-	for name, host := range hostMap {
-		keys[i] = EtcdKeyJoin(NODE_PREFIX, host, name)
+	for _, name := range names {
+		keys[i] = EtcdKeyJoin(NODE_PREFIX, name)
 		i++
 	}
-	self.client.MultiDel(keys)
+	err := self.client.MultiDel(keys)
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+func (self *EtcdStorage) HandlesNode(host, node string) (bool, error) {
+	nodeHost, err := self.NodeToHost(node)
+	if err != nil {
+		return false, err
+	}
+	return nodeHost == host, nil
 }

@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
+
 	"github.com/xcat2/goconserver/common"
 )
 
@@ -91,12 +92,12 @@ type StorInterface interface {
 	ImportNodes() // import nodes to Storage.Nodes
 	PersistWatcher(eventChan chan<- interface{})
 	GetVhosts() (map[string]*EndpointConfig, error)
-	GetNodeCountEachHost() (map[string]int, error) // key host, value int count
 	GetNodes() map[string]*Node
 	GetEndpoint(host string) (*EndpointConfig, error)
 	NotifyPersist(interface{}, int) error
 	SupportWatcher() bool
 	ListNodeWithHost() (map[string]string, error) // key node name, value host
+	HandlesNode(host, node string) (bool, error)
 }
 
 func NewStorage(storType string) (StorInterface, error) {

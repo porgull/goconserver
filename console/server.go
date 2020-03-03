@@ -4,12 +4,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/xcat2/goconserver/common"
-	pb "github.com/xcat2/goconserver/console/consolepb"
-	pl "github.com/xcat2/goconserver/console/pipeline"
-	"github.com/xcat2/goconserver/plugins"
-	"github.com/xcat2/goconserver/storage"
-	"golang.org/x/net/websocket"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +11,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/xcat2/goconserver/common"
+	pb "github.com/xcat2/goconserver/console/consolepb"
+	pl "github.com/xcat2/goconserver/console/pipeline"
+	"github.com/xcat2/goconserver/plugins"
+	"github.com/xcat2/goconserver/storage"
+	"golang.org/x/net/websocket"
 )
 
 const (
@@ -58,6 +59,7 @@ type Node struct {
 	ready       chan bool // indicate session has been established with remote
 	rwLock      *sync.RWMutex
 	reconnect   chan struct{} //  wait on this channel to get the start action.
+	disconnect  chan struct{}
 	reserve     int
 }
 
@@ -65,6 +67,7 @@ func NewNodeFromStor(storNode *storage.Node) *Node {
 	node := new(Node)
 	node.ready = make(chan bool, 0) // block client
 	node.reconnect = make(chan struct{}, 0)
+	node.disconnect = make(chan struct{}, 0)
 	node.status = STATUS_AVAIABLE
 	node.StorageNode = storNode
 	if node.StorageNode.Ondemand == false {
@@ -99,6 +102,7 @@ func (self *Node) init() {
 	self.reserve = common.TYPE_NO_LOCK
 	self.ready = make(chan bool, 0) // block client
 	self.reconnect = make(chan struct{}, 0)
+	self.disconnect = make(chan struct{}, 0)
 	self.status = STATUS_AVAIABLE
 }
 
@@ -114,7 +118,7 @@ func (self *Node) Validate() error {
 }
 
 // if ondemand is false, start this goroutine to help restart the console
-func (self *Node) restartMonitor() {
+func (self *Node) watchChannels() {
 	var ok bool
 	var err error
 	for {
@@ -124,6 +128,9 @@ func (self *Node) restartMonitor() {
 				plog.DebugNode(self.StorageNode.Name, "Exit reconnect goroutine")
 				return
 			}
+
+			plog.InfoNode(self.StorageNode.Name, "Reconnecting...")
+
 			// before start console, both request from client and reconnecting monitor try to get the lock at first
 			// so that only one startConsole goroutine is running for the node.
 			if err = self.RequireLock(false); err != nil {
@@ -139,9 +146,35 @@ func (self *Node) restartMonitor() {
 				self.Release(false)
 				break
 			}
+
 			plog.DebugNode(self.StorageNode.Name, "Restart console session.")
 			go self.startConsole()
 			common.TimeoutChan(self.ready, serverConfig.Console.TargetTimeout)
+			self.Release(false)
+		case _, ok = <-self.disconnect:
+			if !ok {
+				plog.DebugNode(self.StorageNode.Name, "Exit disconnect goroutine")
+				return
+			}
+
+			plog.InfoNode(self.StorageNode.Name, "Disconnecting...")
+
+			if err = self.RequireLock(false); err != nil {
+				plog.ErrorNode(self.StorageNode.Name, err.Error())
+				break
+			}
+			// with lock then check
+			if self.GetStatus() != STATUS_CONNECTED {
+				self.Release(false)
+				break
+			}
+			if self.logging == false {
+				self.Release(false)
+				break
+			}
+
+			plog.DebugNode(self.StorageNode.Name, "Stopping console session.")
+			self.stopConsole()
 			self.Release(false)
 		}
 	}
@@ -150,6 +183,7 @@ func (self *Node) restartMonitor() {
 // A little different from StartConsole, this function do not handle the node lock, node ready
 // is used to wake up the waiting channel outside.
 func (self *Node) startConsole() {
+
 	var consolePlugin plugins.ConsolePlugin
 	var err error
 	var baseSession *plugins.BaseSession
@@ -164,6 +198,17 @@ func (self *Node) startConsole() {
 		self.ready <- false
 		if self.StorageNode.Ondemand == false {
 			go func() {
+				if nodeManager.stor.SupportWatcher() {
+					handles, err := nodeManager.stor.HandlesNode(nodeManager.hostname, self.StorageNode.Name)
+					if err != nil {
+						plog.ErrorNode(self.StorageNode.Name, err)
+					}
+					if handles == false {
+						plog.InfoNode(self.StorageNode.Name, "Host no longer owns node, not going to attempt reconnecting...")
+						return
+					}
+				}
+
 				plog.DebugNode(self.StorageNode.Name, fmt.Sprintf("Could not start console, wait %d seconds and try again, error:%s",
 					serverConfig.Console.ReconnectInterval, err.Error()))
 				time.Sleep(time.Duration(serverConfig.Console.ReconnectInterval) * time.Second)
@@ -178,6 +223,17 @@ func (self *Node) startConsole() {
 		self.ready <- false
 		if self.StorageNode.Ondemand == false {
 			go func() {
+				if nodeManager.stor.SupportWatcher() {
+					handles, err := nodeManager.stor.HandlesNode(nodeManager.hostname, self.StorageNode.Name)
+					if err != nil {
+						plog.ErrorNode(self.StorageNode.Name, err)
+					}
+					if handles == false {
+						plog.InfoNode(self.StorageNode.Name, "Host no longer owns node, not going to attempt reconnecting...")
+						return
+					}
+				}
+
 				plog.DebugNode(self.StorageNode.Name, fmt.Sprintf("Could not start console, wait %d seconds and try again, error:%s",
 					serverConfig.Console.ReconnectInterval, err.Error()))
 				time.Sleep(time.Duration(serverConfig.Console.ReconnectInterval) * time.Second)
@@ -193,6 +249,17 @@ func (self *Node) startConsole() {
 	// only when the Ondemand is false, console session will be restarted automatically
 	if self.StorageNode.Ondemand == false {
 		go func() {
+			if nodeManager.stor.SupportWatcher() {
+				handles, err := nodeManager.stor.HandlesNode(nodeManager.hostname, self.StorageNode.Name)
+				if err != nil {
+					plog.ErrorNode(self.StorageNode.Name, err)
+				}
+				if handles == false {
+					plog.InfoNode(self.StorageNode.Name, "Host no longer owns node, not going to attempt reconnecting...")
+					return
+				}
+			}
+
 			plog.InfoNode(self.StorageNode.Name, "Start console again due to the ondemand setting.")
 			time.Sleep(time.Duration(serverConfig.Console.ReconnectInterval) * time.Second)
 			common.SafeSend(self.reconnect, struct{}{})
@@ -202,6 +269,16 @@ func (self *Node) startConsole() {
 
 // has lock
 func (self *Node) StartConsole() {
+	handles, err := nodeManager.stor.HandlesNode(nodeManager.hostname, self.StorageNode.Name)
+	if err != nil {
+		plog.ErrorNode(self.StorageNode.Name, err)
+	} else {
+		if handles == false {
+			plog.ErrorNode(self.StorageNode.Name, "Attempted to connect to node that is not managed by current host, not going to start console...")
+			return
+		}
+	}
+
 	if err := self.RequireLock(false); err != nil {
 		plog.ErrorNode(self.StorageNode.Name, fmt.Sprintf("Could not start console, error: %s", err.Error()))
 		return
@@ -430,7 +507,13 @@ func GetNodeManager() *NodeManager {
 		// for linelogger to send the last buffer
 		go nodeManager.PeriodicTask()
 		runtime.GOMAXPROCS(serverConfig.Global.Worker)
-		nodeManager.initConsole()
+		err = nodeManager.initConsole()
+		if err != nil {
+			panic(err)
+		}
+		if nodeManager.stor.SupportWatcher() {
+			go nodeManager.EnsureConnectedToNodes()
+		}
 		go nodeManager.PersistWatcher()
 		go consoleServer.Listen()
 		if nodeManager.stor.SupportWatcher() {
@@ -476,34 +559,43 @@ func (self *NodeManager) exportStorage() map[string]*storage.Node {
 }
 
 // start console if required
-func (self *NodeManager) initConsole() {
+func (self *NodeManager) initConsole() error {
 	self.RWlock.RLock()
 	for _, v := range self.Nodes {
 		// node is a pointer, it's ok to init like this。
 		// Can not use v dirrectly as the reference of v would be changed within the iteration. (tricky)
 		node := v
+		handles, err := self.stor.HandlesNode(self.hostname, node.StorageNode.Name)
+		if err != nil {
+			return err
+		}
 		if node.StorageNode.Ondemand == false {
 			go func() {
 				if err := node.RequireLock(false); err != nil {
 					plog.WarningNode(node.StorageNode.Name, "Conflict while starting console.")
 					return
 				}
-				if node.status == STATUS_CONNECTED {
-					plog.WarningNode(node.StorageNode.Name, "Console has already been started.")
-					node.Release(false)
-					return
+				if handles {
+					if node.status == STATUS_CONNECTED {
+						plog.WarningNode(node.StorageNode.Name, "Console has already been started.")
+						node.Release(false)
+						return
+					}
 				}
-				go node.restartMonitor()
-				go node.startConsole()
-				if err := common.TimeoutChan(node.GetReadyChan(),
-					serverConfig.Console.TargetTimeout); err != nil {
-					plog.ErrorNode(node.StorageNode.Name, err)
+				go node.watchChannels()
+				if handles {
+					go node.startConsole()
+					if err := common.TimeoutChan(node.GetReadyChan(),
+						serverConfig.Console.TargetTimeout); err != nil {
+						plog.ErrorNode(node.StorageNode.Name, err)
+					}
 				}
 				node.Release(false)
 			}()
 		}
 	}
 	self.RWlock.RUnlock()
+	return nil
 }
 
 func (self *NodeManager) ListNode() map[string][]map[string]string {
@@ -541,7 +633,9 @@ func (self *NodeManager) ListNode() map[string][]map[string]string {
 				continue
 			}
 			for k, v := range rpcResult {
-				statusMap[k] = v
+				if vhost == nodeWithHost[k] {
+					statusMap[k] = v
+				}
 			}
 		}
 		for node, vhost := range nodeWithHost {
@@ -678,6 +772,11 @@ func (self *NodeManager) SetConsoleState(nodes []string, state string) (map[stri
 }
 
 func (self *NodeManager) postNode(storNode *storage.Node) (int, string) {
+	handles, err := self.stor.HandlesNode(self.hostname, storNode.Name)
+	if err != nil {
+		return http.StatusInternalServerError, err.Error()
+	}
+
 	node := NewNodeFromStor(storNode)
 	if err := node.Validate(); err != nil {
 		return http.StatusBadRequest, err.Error()
@@ -687,13 +786,18 @@ func (self *NodeManager) postNode(storNode *storage.Node) (int, string) {
 		self.RWlock.Unlock()
 		return http.StatusConflict, fmt.Sprintf("The node name %s is already exist", node.StorageNode.Name)
 	}
-	node.SetStatus(STATUS_ENROLL)
+
+	if handles {
+		node.SetStatus(STATUS_ENROLL)
+	}
 	self.Nodes[node.StorageNode.Name] = node
 	self.RWlock.Unlock()
 	plog.InfoNode(node.StorageNode.Name, "Created.")
 	if node.StorageNode.Ondemand == false {
-		go node.restartMonitor()
-		node.StartConsole()
+		go node.watchChannels()
+		if handles {
+			node.StartConsole()
+		}
 	}
 	return http.StatusAccepted, ""
 }
@@ -761,13 +865,23 @@ func (self *NodeManager) postNodes(storNodes []storage.Node, result map[string]s
 			self.RWlock.Unlock()
 			continue
 		}
-		node.SetStatus(STATUS_ENROLL)
+		handles, err := self.stor.HandlesNode(self.hostname, node.StorageNode.Name)
+		if err != nil {
+			plog.ErrorNode(node.StorageNode.Name, err)
+			self.RWlock.Unlock()
+			continue
+		}
+		if handles {
+			node.SetStatus(STATUS_ENROLL)
+		}
 		self.Nodes[node.StorageNode.Name] = node
 		self.RWlock.Unlock()
 		result[node.StorageNode.Name] = common.RESULT_CREATED
 		if node.StorageNode.Ondemand == false {
-			go node.restartMonitor()
-			node.StartConsole()
+			go node.watchChannels()
+			if handles {
+				node.StartConsole()
+			}
 		}
 	}
 }
@@ -813,7 +927,12 @@ func (self *NodeManager) deleteNode(nodeName string) (int, string) {
 		return http.StatusBadRequest, fmt.Sprintf("Node %s is not exist", nodeName)
 	}
 	if node.StorageNode.Ondemand == false {
-		close(node.reconnect)
+		if node.reconnect != nil {
+			close(node.reconnect)
+		}
+		if node.disconnect != nil {
+			close(node.disconnect)
+		}
 	}
 	if node.GetStatus() == STATUS_CONNECTED {
 		if err := node.StopConsole(); err != nil {
@@ -869,6 +988,7 @@ func (self *NodeManager) deleteNodes(names []string, result map[string]string) {
 		node := self.Nodes[v]
 		if node.StorageNode.Ondemand == false {
 			close(node.reconnect)
+			close(node.disconnect)
 		}
 		if node.GetStatus() == STATUS_CONNECTED {
 			if err := node.StopConsole(); err != nil {
@@ -1007,6 +1127,50 @@ func (self *NodeManager) Exists(nodeName string) bool {
 	return false
 }
 
+// EnsureConnectedToNodes watches ListNodeWithHost to ensure
+// that, if any ondemand=false nodes change hosts, the nodes
+// will be stopped/started accordingly
+func (self *NodeManager) EnsureConnectedToNodes() {
+	timeout := time.Second * 5
+
+	plog.Debug("Watching for changes on hosts/nodes...")
+	for {
+		currentNodeWithHost, err := self.stor.ListNodeWithHost()
+		if err != nil {
+			plog.Error(err)
+			time.Sleep(timeout)
+			continue
+		}
+
+		for nodeName, host := range currentNodeWithHost {
+			if _, exists := self.Nodes[nodeName]; !exists {
+				plog.ErrorNode(nodeName, "Node in storage not found in NodeManager map, skipping...")
+				continue
+			}
+			node := self.Nodes[nodeName]
+			node.RequireLock(true)
+			if node.StorageNode.Ondemand == true {
+				continue
+			}
+			nodeStatus := node.GetStatus()
+			node.Release(true)
+			if host == self.hostname {
+				if nodeStatus != STATUS_CONNECTED {
+					plog.InfoNode(nodeName, fmt.Sprintf("ondemand=false node on %s not connected, reconnecting...", self.hostname))
+					common.SafeSend(node.reconnect, struct{}{})
+				}
+			} else {
+				if nodeStatus == STATUS_CONNECTED {
+					plog.InfoNode(nodeName, fmt.Sprintf("ondemand=false node on other host %s connected on current host (%s), disconnecting...", host, self.hostname))
+					common.SafeSend(node.disconnect, struct{}{})
+				}
+			}
+		}
+
+		time.Sleep(timeout)
+	}
+}
+
 func (self *NodeManager) PersistWatcher() {
 	if !self.stor.SupportWatcher() {
 		self.stor.PersistWatcher(nil)
@@ -1026,6 +1190,7 @@ func (self *NodeManager) PersistWatcher() {
 				plog.Error(common.ErrInvalidType)
 				break
 			}
+
 			_, msg := self.postNode(node)
 			if msg != "" {
 				plog.ErrorNode(node.Name, msg)
@@ -1036,6 +1201,7 @@ func (self *NodeManager) PersistWatcher() {
 				plog.Error(common.ErrInvalidType)
 				break
 			}
+
 			_, msg := self.deleteNode(name)
 			if msg != "" {
 				plog.ErrorNode(name, msg)

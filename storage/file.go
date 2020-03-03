@@ -3,10 +3,11 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/xcat2/goconserver/common"
 	"io/ioutil"
 	"path"
 	"reflect"
+
+	"github.com/xcat2/goconserver/common"
 )
 
 const (
@@ -142,10 +143,10 @@ func (self *FileStorage) GetVhosts() (map[string]*EndpointConfig, error) {
 	return nil, common.ErrUnsupported
 }
 
-func (self *FileStorage) GetNodeCountEachHost() (map[string]int, error) {
+func (self *FileStorage) GetEndpoint(host string) (*EndpointConfig, error) {
 	return nil, common.ErrUnsupported
 }
 
-func (self *FileStorage) GetEndpoint(host string) (*EndpointConfig, error) {
-	return nil, common.ErrUnsupported
+func (self *FileStorage) HandlesNode(host, node string) (bool, error) {
+	return true, nil // FileStorage means only one instance, which handles all nodes
 }

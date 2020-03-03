@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/xcat2/goconserver/common"
 	"io"
 	"net"
 	"time"
+
+	"github.com/xcat2/goconserver/common"
 )
 
 const (
@@ -167,25 +168,38 @@ func serverHandshake(conn net.Conn) (*Node, error) {
 		return nil, common.ErrConnection
 	}
 	name = m.Node
+
 	nodeManager.RWlock.RLock()
 	if node, ok = nodeManager.Nodes[name]; !ok {
 		nodeManager.RWlock.RUnlock()
-		if !nodeManager.stor.SupportWatcher() {
-			defer conn.Close()
-			plog.ErrorNode(name, "Could not find this node.")
-			err = sendProtoMessage(conn, common.ErrNodeNotExist.Error(), ACTION_SESSION_DROP, clientTimeout)
-			if err != nil {
-				plog.ErrorNode(name, err)
-			}
-			return nil, common.ErrNodeNotExist
-		}
-		err = redirect(conn, name)
+		defer conn.Close()
+		plog.ErrorNode(name, "Could not find this node.")
+		err = sendProtoMessage(conn, common.ErrNodeNotExist.Error(), ACTION_SESSION_DROP, clientTimeout)
 		if err != nil {
-			conn.Close()
-			return nil, err
+			plog.ErrorNode(name, err)
 		}
-		return nil, nil
+		return nil, common.ErrNodeNotExist
 	}
 	nodeManager.RWlock.RUnlock()
+
+	if nodeManager.stor.SupportWatcher() {
+		nodeWithHost, err := nodeManager.stor.ListNodeWithHost()
+		if err != nil {
+			return nil, err
+		}
+		host, ok := nodeWithHost[name]
+		if !ok {
+			return nil, common.ErrHostNotFound
+		}
+
+		if host != nodeManager.hostname {
+			err = redirect(conn, name)
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+			return nil, nil
+		}
+	}
 	return node, nil
 }
