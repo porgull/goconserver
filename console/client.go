@@ -3,8 +3,6 @@ package console
 import (
 	"crypto/tls"
 	"fmt"
-	"github.com/xcat2/goconserver/common"
-	"golang.org/x/crypto/ssh/terminal"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -13,6 +11,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/xcat2/goconserver/common"
+	"golang.org/x/crypto/ssh/terminal"
 )
 
 const (

@@ -100,6 +100,7 @@ type EtcdCfg struct {
 	RpcClientCertFile   string `yaml:"rpc_client_cert_file"`
 	RpcClientCACertFile string `yaml:"rpc_client_ca_cert_file"`
 	RpcInsucure         bool   `yaml:"rpc_insucure"`
+	SyncToFile          bool   `yaml:"sync_to_file"`
 }
 
 type BreakSequenceCfg struct {

@@ -22,7 +22,7 @@ var (
 
 type EtcdClient struct {
 	config *common.EtcdCfg
-	cli    *clientv3.Client
+	Cli    *clientv3.Client
 }
 
 func NewEtcdClient(config *common.EtcdCfg) (*EtcdClient, error) {
@@ -52,7 +52,7 @@ func NewEtcdClient(config *common.EtcdCfg) (*EtcdClient, error) {
 	}
 	etcdClient := new(EtcdClient)
 	etcdClient.config = config
-	etcdClient.cli, err = clientv3.New(clientv3.Config{
+	etcdClient.Cli, err = clientv3.New(clientv3.Config{
 		Endpoints:   endpoints[:],
 		DialTimeout: time.Duration(config.DailTimeout) * time.Second,
 		TLS:         tlsConfig,
@@ -65,13 +65,13 @@ func NewEtcdClient(config *common.EtcdCfg) (*EtcdClient, error) {
 }
 
 func (self *EtcdClient) Close() {
-	self.cli.Close()
+	self.Cli.Close()
 }
 
 func (self *EtcdClient) Get(key string) ([]byte, error) {
 	var err error
 	var resp *clientv3.GetResponse
-	if resp, err = self.cli.Get(context.TODO(), key); err != nil {
+	if resp, err = self.Cli.Get(context.TODO(), key); err != nil {
 		return nil, err
 	}
 	if len(resp.Kvs) == 0 {
@@ -93,7 +93,7 @@ func (self *EtcdClient) Put(key string, val interface{}) error {
 		plog.Error("Invalid type")
 		return common.ErrInvalidType
 	}
-	if _, err = self.cli.Put(context.TODO(), key, s); err != nil {
+	if _, err = self.Cli.Put(context.TODO(), key, s); err != nil {
 		return err
 	}
 	return nil
@@ -101,7 +101,7 @@ func (self *EtcdClient) Put(key string, val interface{}) error {
 
 func (self *EtcdClient) Del(key string) error {
 	var err error
-	if _, err = self.cli.Delete(context.TODO(), key); err != nil {
+	if _, err = self.Cli.Delete(context.TODO(), key); err != nil {
 		return err
 	}
 	return nil
@@ -111,7 +111,7 @@ func (self *EtcdClient) List(path string) (map[string]string, error) {
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
-	resp, err := self.cli.Get(context.TODO(), path, clientv3.WithPrefix())
+	resp, err := self.Cli.Get(context.TODO(), path, clientv3.WithPrefix())
 	if err != nil {
 		plog.Error(err)
 		return nil, err
@@ -127,7 +127,7 @@ func (self *EtcdClient) Keys(path string) ([]string, error) {
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
-	resp, err := self.cli.Get(context.TODO(), path, clientv3.WithPrefix(), clientv3.WithKeysOnly())
+	resp, err := self.Cli.Get(context.TODO(), path, clientv3.WithPrefix(), clientv3.WithKeysOnly())
 	if err != nil {
 		plog.Error(err)
 		return nil, err
@@ -143,7 +143,7 @@ func (self *EtcdClient) Count(path string) (int, error) {
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
 	}
-	resp, err := self.cli.Get(context.TODO(), path, clientv3.WithPrefix(), clientv3.WithCountOnly())
+	resp, err := self.Cli.Get(context.TODO(), path, clientv3.WithPrefix(), clientv3.WithCountOnly())
 	if err != nil {
 		plog.Error(err)
 		return 0, err
@@ -169,7 +169,7 @@ func (self *EtcdClient) MultiPut(m map[string]string) error {
 		ops = append(ops, block)
 	}
 	for _, block := range ops {
-		response, err = self.cli.Txn(ctx).Then(block...).Commit()
+		response, err = self.Cli.Txn(ctx).Then(block...).Commit()
 		if ctx.Err() == context.DeadlineExceeded {
 			plog.Error("Timeout while execute multiple put operation")
 			return common.ErrTimeout
@@ -204,7 +204,7 @@ func (self *EtcdClient) MultiGet(m map[string]string) (map[string]string, error)
 		ops = append(ops, block)
 	}
 	for _, block := range ops {
-		response, err = self.cli.Txn(ctx).Then(block...).Commit()
+		response, err = self.Cli.Txn(ctx).Then(block...).Commit()
 		if ctx.Err() == context.DeadlineExceeded {
 			plog.Error("Timeout while execute multiple get operation")
 			return nil, common.ErrTimeout
@@ -248,7 +248,7 @@ func (self *EtcdClient) MultiDel(keys []string) error {
 		ops = append(ops, block)
 	}
 	for _, block := range ops {
-		response, err = self.cli.Txn(ctx).Then(block...).Commit()
+		response, err = self.Cli.Txn(ctx).Then(block...).Commit()
 		if ctx.Err() == context.DeadlineExceeded {
 			plog.Error("Timeout while execute multiple del operation")
 			return common.ErrTimeout
@@ -266,7 +266,7 @@ func (self *EtcdClient) MultiDel(keys []string) error {
 }
 
 func (self *EtcdClient) Lock(path string) (*concurrency.Mutex, error) {
-	session, err := concurrency.NewSession(self.cli)
+	session, err := concurrency.NewSession(self.Cli)
 	if err != nil {
 		plog.Error(err)
 		return nil, err
@@ -298,14 +298,14 @@ func (self *EtcdClient) RegisterAndKeepalive(lockPath string, servicePath string
 		plog.Warn(fmt.Sprintf("%s:%s", servicePath, common.ErrAlreadyExist.Error()))
 		return common.ErrAlreadyExist
 	}
-	lease := clientv3.NewLease(self.cli)
+	lease := clientv3.NewLease(self.Cli)
 	resp, err := lease.Grant(context.TODO(), self.config.ServiceHeartbeat)
 	if err != nil {
 		plog.Error(err)
 		self.Unlock(m)
 		return err
 	}
-	_, err = self.cli.Put(context.TODO(), servicePath, serviceVal, clientv3.WithLease(resp.ID))
+	_, err = self.Cli.Put(context.TODO(), servicePath, serviceVal, clientv3.WithLease(resp.ID))
 	if err != nil {
 		plog.Error(err)
 		self.Unlock(m)
@@ -318,7 +318,7 @@ func (self *EtcdClient) RegisterAndKeepalive(lockPath string, servicePath string
 		t = 1
 	}
 	for {
-		self.cli.KeepAlive(context.TODO(), resp.ID)
+		self.Cli.KeepAlive(context.TODO(), resp.ID)
 		time.Sleep(time.Duration(t) * time.Second)
 	}
 	return nil
@@ -329,7 +329,7 @@ func (self *EtcdClient) Watch(path string, fc func([]*clientv3.Event, chan<- int
 		path += "/"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	rch := self.cli.Watch(ctx, path, clientv3.WithPrefix())
+	rch := self.Cli.Watch(ctx, path, clientv3.WithPrefix())
 	for resp := range rch {
 		fc(resp.Events, c)
 	}
