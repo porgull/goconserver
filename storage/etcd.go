@@ -118,7 +118,7 @@ func (e *EtcdStorage) runElection() {
 		Client:           e.client.Cli,
 		ElectionName:     "goconserver",
 		CandidateName:    e.vhost,
-		TTL:              35,
+		TTL:              10,
 		ResumeLeader:     true,
 		ReconnectBackOff: time.Second * 2,
 	}

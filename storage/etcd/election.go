@@ -10,6 +10,8 @@ import (
 	"github.com/pkg/errors"
 )
 
+// modified from: https://gist.github.com/thrawn01/c007e6a37b682d3899910e33243a3cdc
+
 type Election struct {
 	Client           *etcd.Client
 	ElectionName     string
